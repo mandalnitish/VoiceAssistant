@@ -2,7 +2,7 @@
 MirAIe AC Bridge Server
 =======================
 
-Flask HTTP API for controlling a Panasonic MirAIe AC
+Flask HTTP bridge for controlling a Panasonic MirAIe AC
 using the community miraie-ac Python library.
 
 Public endpoints:
@@ -18,7 +18,7 @@ Protected endpoints:
     POST /ac/temperature/<temperature>
     POST /ac/mode/<mode>
 
-Required environment variables:
+Required Render environment variables:
     MIRAIE_MOBILE
     MIRAIE_PASSWORD
     BRIDGE_API_KEY
@@ -31,6 +31,7 @@ import threading
 import time
 
 from flask import Flask, jsonify, request
+
 from miraie_ac import MirAIeBroker, MirAIeHub
 from miraie_ac.enums import HVACMode
 
@@ -48,7 +49,7 @@ log = logging.getLogger("miraie-bridge")
 
 
 # ============================================================================
-# FLASK APPLICATION
+# FLASK
 # ============================================================================
 
 app = Flask(__name__)
@@ -64,7 +65,7 @@ API_KEY = os.getenv("BRIDGE_API_KEY")
 
 
 # ============================================================================
-# MIRAIe STATE
+# GLOBAL MIRAIe STATE
 # ============================================================================
 
 loop = None
@@ -74,67 +75,80 @@ hub = None
 broker = None
 
 connected = threading.Event()
+loop_ready = threading.Event()
+startup_started = threading.Event()
 
 connect_error = None
 
-startup_lock = threading.Lock()
-startup_complete = False
+state_lock = threading.Lock()
 
 
 # ============================================================================
-# ASYNCIO LOOP
+# ASYNCIO THREAD
 # ============================================================================
 
-def asyncio_worker():
+def asyncio_thread_worker():
     """
-    Dedicated asyncio thread.
-
-    The MirAIe MQTT library uses asyncio, while Flask/Gunicorn
-    handles normal synchronous HTTP requests.
+    Dedicated asyncio event loop for miraie-ac.
     """
 
     global loop
 
-    loop = asyncio.new_event_loop()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    asyncio.set_event_loop(loop)
+        log.info("MirAIe asyncio loop started")
 
-    log.info("MirAIe asyncio loop started")
+        # Tell the Flask side that the loop exists.
+        loop_ready.set()
 
-    loop.run_forever()
+        # Keep the loop alive.
+        loop.run_forever()
+
+    except Exception as exc:
+        log.exception(
+            "MirAIe asyncio loop crashed: %s",
+            exc,
+        )
+
+    finally:
+        loop_ready.set()
 
 
 def start_asyncio_loop():
     """
-    Start the asyncio loop exactly once.
+    Start the asyncio thread once.
+
+    IMPORTANT:
+    This function does NOT use a lock that can deadlock during
+    Flask/Gunicorn startup.
     """
 
     global loop_thread
 
-    with startup_lock:
+    if loop_thread is not None and loop_thread.is_alive():
+        return
+
+    with state_lock:
 
         if loop_thread is not None and loop_thread.is_alive():
             return
 
         loop_thread = threading.Thread(
-            target=asyncio_worker,
+            target=asyncio_thread_worker,
             daemon=True,
             name="miraie-asyncio",
         )
 
         loop_thread.start()
 
-    # Wait until the asyncio loop exists.
-    for _ in range(100):
-
-        if loop is not None:
-            return
-
-        time.sleep(0.01)
-
-    raise RuntimeError(
-        "MirAIe asyncio loop failed to start"
-    )
+    # Wait only for the asyncio loop itself.
+    # This does NOT wait for MirAIe authentication.
+    if not loop_ready.wait(timeout=5):
+        raise RuntimeError(
+            "MirAIe asyncio loop did not start"
+        )
 
 
 # ============================================================================
@@ -143,7 +157,9 @@ def start_asyncio_loop():
 
 async def connect_miraie():
     """
-    Connect and authenticate with MirAIe.
+    Connect to the MirAIe service.
+
+    This runs inside the dedicated asyncio event loop.
     """
 
     global hub
@@ -154,21 +170,20 @@ async def connect_miraie():
 
         if not MOBILE:
             raise RuntimeError(
-                "MIRAIE_MOBILE is not configured"
+                "MIRAIE_MOBILE environment variable is missing"
             )
 
         if not PASSWORD:
             raise RuntimeError(
-                "MIRAIE_PASSWORD is not configured"
+                "MIRAIE_PASSWORD environment variable is missing"
             )
 
         log.info("Connecting to MirAIe...")
 
-        # Create broker and hub inside the dedicated asyncio loop.
+        # Create these objects inside the asyncio thread.
         broker = MirAIeBroker()
         hub = MirAIeHub()
 
-        # Authenticate.
         await hub.init(
             MOBILE,
             PASSWORD,
@@ -206,7 +221,7 @@ async def connect_miraie():
         except Exception:
 
             log.exception(
-                "Connected to MirAIe but could not list devices"
+                "Connected, but could not list devices"
             )
 
     except Exception as exc:
@@ -221,56 +236,84 @@ async def connect_miraie():
 
 def start_miraie_connection():
     """
-    Start the asyncio loop and then start the MirAIe connection.
+    Start the asyncio loop and schedule MirAIe connection.
+
+    This function returns immediately after scheduling the connection.
     """
 
     start_asyncio_loop()
 
+    if loop is None:
+        raise RuntimeError(
+            "MirAIe asyncio loop is unavailable"
+        )
+
+    # Do not start multiple connection attempts.
+    if connected.is_set():
+        return
+
+    # Schedule connection on the dedicated asyncio loop.
     asyncio.run_coroutine_threadsafe(
         connect_miraie(),
         loop,
     )
 
 
-# ============================================================================
-# CONNECTION CHECK
-# ============================================================================
-
-def require_connection():
+def ensure_miraie_started():
     """
-    Make sure MirAIe is ready before executing an AC command.
+    Start MirAIe connection in the background.
+
+    This is deliberately non-blocking.
     """
 
-    if not connected.is_set():
+    if startup_started.is_set():
+        return
 
-        raise RuntimeError(
-            connect_error
-            or "MirAIe is still connecting. Please try again."
-        )
+    with state_lock:
 
-    if hub is None:
+        if startup_started.is_set():
+            return
 
-        raise RuntimeError(
-            "MirAIe hub is not initialized"
-        )
+        startup_started.set()
 
-    if broker is None:
+        try:
 
-        raise RuntimeError(
-            "MirAIe broker is not initialized"
-        )
+            start_miraie_connection()
 
-    if not hasattr(hub, "home"):
+        except Exception as exc:
 
-        raise RuntimeError(
-            "MirAIe home is not available"
-        )
+            startup_started.clear()
 
-    if not hub.home.devices:
+            log.exception(
+                "Could not start MirAIe: %s",
+                exc,
+            )
 
-        raise RuntimeError(
-            "No MirAIe devices were found"
-        )
+
+# ============================================================================
+# WAIT FOR MIRAIe
+# ============================================================================
+
+def wait_for_connection(timeout=30):
+    """
+    Wait for MirAIe to become connected.
+
+    Used only by AC control commands.
+    /health never waits for this.
+    """
+
+    ensure_miraie_started()
+
+    end_time = time.monotonic() + timeout
+
+    while time.monotonic() < end_time:
+
+        if connected.is_set():
+            return True
+
+        time.sleep(0.2)
+
+    return connected.is_set()
 
 
 # ============================================================================
@@ -283,28 +326,35 @@ async def execute_device_command(
     *args,
 ):
     """
-    Execute an async command on the MirAIe device.
+    Execute a method on the MirAIe device.
 
-    This function runs on the same asyncio loop as MQTT.
+    Runs inside the MirAIe asyncio event loop.
     """
 
     if not connected.is_set():
-
         raise RuntimeError(
             connect_error
             or "MirAIe is not connected"
         )
 
+    if hub is None:
+        raise RuntimeError(
+            "MirAIe hub is not initialized"
+        )
+
+    if not hasattr(hub, "home"):
+        raise RuntimeError(
+            "MirAIe home is not available"
+        )
+
     devices = hub.home.devices
 
     if not devices:
-
         raise RuntimeError(
-            "No MirAIe devices available"
+            "No MirAIe devices found"
         )
 
     if device_index < 0 or device_index >= len(devices):
-
         raise RuntimeError(
             f"Invalid device index: {device_index}"
         )
@@ -318,11 +368,10 @@ async def execute_device_command(
     )
 
     if method is None:
-
         return False, None
 
     log.info(
-        "Executing device.%s(%s)",
+        "Calling device.%s(%s)",
         method_name,
         args,
     )
@@ -330,7 +379,6 @@ async def execute_device_command(
     result = method(*args)
 
     if asyncio.iscoroutine(result):
-
         result = await result
 
     log.info(
@@ -348,13 +396,16 @@ def call_device(
     timeout=30,
 ):
     """
-    Call an async MirAIe device method from Flask.
+    Safely call an async device method from Flask.
     """
 
-    require_connection()
+    if not wait_for_connection(timeout=timeout):
+        raise RuntimeError(
+            connect_error
+            or "MirAIe is still connecting"
+        )
 
     if loop is None:
-
         raise RuntimeError(
             "MirAIe asyncio loop is not running"
         )
@@ -378,11 +429,6 @@ def call_device(
 
         future.cancel()
 
-        log.error(
-            "Timeout executing device.%s()",
-            method_name,
-        )
-
         raise RuntimeError(
             f"MirAIe command '{method_name}' timed out"
         )
@@ -390,8 +436,7 @@ def call_device(
     except Exception as exc:
 
         log.exception(
-            "MirAIe command failed: %s",
-            method_name,
+            "Device command failed"
         )
 
         raise RuntimeError(
@@ -406,9 +451,10 @@ def call_device(
 @app.before_request
 def check_auth():
     """
-    Require X-Api-Key for AC/control endpoints.
+    / and /health are public.
 
-    / and /health remain public.
+    All AC endpoints require:
+        X-Api-Key: <BRIDGE_API_KEY>
     """
 
     if request.path in (
@@ -420,17 +466,17 @@ def check_auth():
     if not API_KEY:
 
         return jsonify({
-            "error": "BRIDGE_API_KEY is not configured on Render",
+            "error": "BRIDGE_API_KEY is not configured on Render"
         }), 500
 
     supplied_key = request.headers.get(
-        "X-Api-Key",
+        "X-Api-Key"
     )
 
     if supplied_key != API_KEY:
 
         return jsonify({
-            "error": "unauthorized",
+            "error": "unauthorized"
         }), 401
 
     return None
@@ -445,6 +491,9 @@ def check_auth():
     methods=["GET", "HEAD"],
 )
 def root():
+
+    # Start MirAIe in background.
+    ensure_miraie_started()
 
     return jsonify({
         "service": "MirAIe AC Bridge",
@@ -462,6 +511,15 @@ def root():
     methods=["GET", "HEAD"],
 )
 def health():
+    """
+    IMPORTANT:
+    This endpoint NEVER waits for MirAIe.
+
+    Render can therefore detect the HTTP service immediately.
+    """
+
+    # Start connection in the background.
+    ensure_miraie_started()
 
     return jsonify({
         "status": "ok",
@@ -482,7 +540,12 @@ def inspect_device():
 
     try:
 
-        require_connection()
+        if not wait_for_connection(30):
+
+            return jsonify({
+                "error": connect_error
+                or "MirAIe is still connecting"
+            }), 503
 
         device = hub.home.devices[0]
 
@@ -504,7 +567,7 @@ def inspect_device():
         )
 
         return jsonify({
-            "error": str(exc),
+            "error": str(exc)
         }), 503
 
 
@@ -516,11 +579,17 @@ def inspect_device():
     "/ac/status",
     methods=["GET"],
 )
-def device_status():
+def ac_status():
 
     try:
 
-        require_connection()
+        if not wait_for_connection(30):
+
+            return jsonify({
+                "connected": False,
+                "error": connect_error
+                or "MirAIe is still connecting",
+            }), 503
 
         device = hub.home.devices[0]
 
@@ -530,27 +599,21 @@ def device_status():
             None,
         )
 
-        if status is None:
-
-            return jsonify({
-                "connected": True,
-                "status": None,
-                "message": "Device status is not available yet",
-            })
-
         return jsonify({
             "connected": True,
-            "status": str(status),
+            "status": str(status)
+            if status is not None
+            else None,
         })
 
     except Exception as exc:
 
         log.exception(
-            "Device status failed"
+            "AC status failed"
         )
 
         return jsonify({
-            "error": str(exc),
+            "error": str(exc)
         }), 503
 
 
@@ -568,12 +631,13 @@ def turn_on():
 
         found, result = call_device(
             "turn_on",
+            timeout=30,
         )
 
         if not found:
 
             return jsonify({
-                "error": "turn_on() not found on device",
+                "error": "turn_on() not found on device"
             }), 500
 
         return jsonify({
@@ -589,7 +653,7 @@ def turn_on():
         )
 
         return jsonify({
-            "error": str(exc),
+            "error": str(exc)
         }), 500
 
 
@@ -607,12 +671,13 @@ def turn_off():
 
         found, result = call_device(
             "turn_off",
+            timeout=30,
         )
 
         if not found:
 
             return jsonify({
-                "error": "turn_off() not found on device",
+                "error": "turn_off() not found on device"
             }), 500
 
         return jsonify({
@@ -628,7 +693,7 @@ def turn_off():
         )
 
         return jsonify({
-            "error": str(exc),
+            "error": str(exc)
         }), 500
 
 
@@ -645,7 +710,7 @@ def set_temperature(value):
     if value < 16 or value > 30:
 
         return jsonify({
-            "error": "Temperature must be between 16 and 30°C",
+            "error": "Temperature must be between 16 and 30°C"
         }), 400
 
     try:
@@ -653,12 +718,16 @@ def set_temperature(value):
         found, result = call_device(
             "set_temperature",
             float(value),
+            timeout=30,
         )
 
         if not found:
 
             return jsonify({
-                "error": "set_temperature() not found on device",
+                "error": (
+                    "set_temperature() "
+                    "not found on device"
+                )
             }), 500
 
         return jsonify({
@@ -675,7 +744,7 @@ def set_temperature(value):
         )
 
         return jsonify({
-            "error": str(exc),
+            "error": str(exc)
         }), 500
 
 
@@ -703,9 +772,9 @@ def set_mode(mode):
 
         return jsonify({
             "error": (
-                "Invalid mode. Use: "
-                "cool, auto, dry, fan, heat"
-            ),
+                "Invalid mode. "
+                "Use cool, auto, dry, fan, heat"
+            )
         }), 400
 
     try:
@@ -713,12 +782,16 @@ def set_mode(mode):
         found, result = call_device(
             "set_hvac_mode",
             modes[mode],
+            timeout=30,
         )
 
         if not found:
 
             return jsonify({
-                "error": "set_hvac_mode() not found on device",
+                "error": (
+                    "set_hvac_mode() "
+                    "not found on device"
+                )
             }), 500
 
         return jsonify({
@@ -735,54 +808,12 @@ def set_mode(mode):
         )
 
         return jsonify({
-            "error": str(exc),
+            "error": str(exc)
         }), 500
 
 
 # ============================================================================
-# START MIRAIe
-# ============================================================================
-
-def initialize_miraie():
-    """
-    Start MirAIe after Flask application has been imported.
-
-    This is intentionally protected so importing app.py does not
-    repeatedly create multiple asyncio loops.
-    """
-
-    global startup_complete
-
-    if startup_complete:
-        return
-
-    with startup_lock:
-
-        if startup_complete:
-            return
-
-        try:
-
-            start_miraie_connection()
-
-            startup_complete = True
-
-        except Exception as exc:
-
-            log.exception(
-                "Could not start MirAIe"
-            )
-
-
-# ============================================================================
-# INITIALIZE
-# ============================================================================
-
-initialize_miraie()
-
-
-# ============================================================================
-# LOCAL DEVELOPMENT
+# LOCAL DEVELOPMENT ONLY
 # ============================================================================
 
 if __name__ == "__main__":
@@ -795,7 +826,7 @@ if __name__ == "__main__":
     )
 
     log.info(
-        "Starting Flask on port %s",
+        "Starting Flask server on port %s",
         port,
     )
 
