@@ -1,34 +1,40 @@
 """
-MirAIe AC bridge server
-========================
-Wraps the community `miraie-ac` Python library (MQTT-based, reverse-engineered —
-Panasonic has no public official API) and exposes plain HTTP endpoints so the
-Android voice assistant app can control the AC with simple POST requests.
+MirAIe AC Bridge Server
+=======================
 
-Why a separate server? `miraie-ac` is Python-only (asyncio + MQTT), there is no
-Android/Kotlin equivalent, so this small always-on service is the bridge.
+Flask HTTP bridge for controlling a Panasonic MirAIe AC using
+the community `miraie-ac` Python library.
 
-ENDPOINTS
-  GET  /health                 -> {"status": "ok", "connected": true/false}
-  GET  /ac/inspect             -> lists every public method on the device object.
-                                   Run this ONCE after deploying to confirm the
-                                   real method names for temperature/mode control
-                                   (they aren't documented anywhere public).
-  POST /ac/on
-  POST /ac/off
-  POST /ac/temperature/<int>   -> e.g. /ac/temperature/24
-  POST /ac/mode/<mode>         -> mode is one of cool/dry/heat/auto/fan
+Endpoints
+---------
+GET  /health
+GET  /ac/inspect
 
-All POST/inspect endpoints require header:  X-Api-Key: <BRIDGE_API_KEY>
-(so a random person who finds your Render URL can't switch your AC off at 2am)
+POST /ac/on
+POST /ac/off
+POST /ac/temperature/<int>
+POST /ac/mode/<mode>
 
-ENV VARS (set these on Render, never hardcode them):
-  MIRAIE_MOBILE     - the mobile number you log into the MirAIe app with (with +91)
-  MIRAIE_PASSWORD   - your MirAIe app password
-  BRIDGE_API_KEY    - a secret string you make up, shared with the Android app
+Authentication
+--------------
+All endpoints except /health require:
+
+    X-Api-Key: <BRIDGE_API_KEY>
+
+Environment variables
+---------------------
+MIRAIE_MOBILE
+    Mobile number used to log into MirAIe, including +91.
+
+MIRAIE_PASSWORD
+    MirAIe account password.
+
+BRIDGE_API_KEY
+    Secret key used by the Android application.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -36,158 +42,608 @@ import threading
 from flask import Flask, jsonify, request
 from miraie_ac import MirAIeBroker, MirAIeHub
 
-logging.basicConfig(level=logging.INFO)
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+
 log = logging.getLogger("miraie-bridge")
+
+
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 
 MOBILE = os.environ.get("MIRAIE_MOBILE")
 PASSWORD = os.environ.get("MIRAIE_PASSWORD")
-API_KEY = os.environ.get("BRIDGE_API_KEY", "")
+API_KEY = os.environ.get("BRIDGE_API_KEY")
 
 app = Flask(__name__)
 
-# --- Background asyncio loop -------------------------------------------------
-# miraie-ac keeps a persistent MQTT connection alive via asyncio. Flask itself
-# is synchronous, so we run one event loop forever in a background thread and
-# hand coroutines to it from the (sync) Flask request handlers.
+
+# ============================================================================
+# GLOBAL MIRAIe OBJECTS
+# ============================================================================
 
 loop = asyncio.new_event_loop()
-hub: MirAIeHub | None = None
-broker: MirAIeBroker | None = None
-connected = threading.Event()
-connect_error: str | None = None
 
+hub = None
+broker = None
+
+connected = threading.Event()
+connect_error = None
+
+
+# ============================================================================
+# BACKGROUND ASYNCIO LOOP
+# ============================================================================
 
 def _run_loop_forever():
+    """
+    Run the MirAIe asyncio event loop permanently
+    in a background thread.
+    """
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
 
-threading.Thread(target=_run_loop_forever, daemon=True, name="miraie-loop").start()
+loop_thread = threading.Thread(
+    target=_run_loop_forever,
+    daemon=True,
+    name="miraie-loop"
+)
 
+loop_thread.start()
+
+
+# ============================================================================
+# MIRAIe CONNECTION
+# ============================================================================
 
 async def _connect():
-    global hub, broker, connect_error
+    """
+    Authenticate with MirAIe and establish the MQTT connection.
+    """
+
+    global hub
+    global broker
+    global connect_error
+
     try:
-        if not MOBILE or not PASSWORD:
-            raise RuntimeError("MIRAIE_MOBILE / MIRAIE_PASSWORD env vars are not set")
+
+        if not MOBILE:
+            raise RuntimeError(
+                "MIRAIE_MOBILE environment variable is not set"
+            )
+
+        if not PASSWORD:
+            raise RuntimeError(
+                "MIRAIE_PASSWORD environment variable is not set"
+            )
+
+        log.info("Connecting to MirAIe...")
+
         broker = MirAIeBroker()
         hub = MirAIeHub()
-        await hub.init(MOBILE, PASSWORD, broker)
-        while not hasattr(broker, "client") or getattr(broker, "client") is None:
+
+        await hub.init(
+            MOBILE,
+            PASSWORD,
+            broker
+        )
+
+        # Wait until the MQTT client is available.
+        while (
+            not hasattr(broker, "client")
+            or getattr(broker, "client") is None
+        ):
             await asyncio.sleep(1)
+
         connected.set()
-        log.info("Connected to MirAIe. Devices: %s", hub.home.devices)
-    except Exception as e:  # noqa: BLE001
+        connect_error = None
+
+        log.info(
+            "Connected to MirAIe successfully."
+        )
+
+        log.info(
+            "Devices found: %s",
+            hub.home.devices
+        )
+
+    except Exception as e:
+
+        connected.clear()
         connect_error = str(e)
-        log.exception("Failed to connect to MirAIe")
+
+        log.exception(
+            "Failed to connect to MirAIe"
+        )
 
 
-asyncio.run_coroutine_threadsafe(_connect(), loop)
+# Start the connection coroutine.
+asyncio.run_coroutine_threadsafe(
+    _connect(),
+    loop
+)
 
 
-async def _call_device_method(device_index: int, method_name: str, *args):
-    """Runs on the bridge's event loop. Calls method_name on the device if it
-    exists, awaiting it if it's a coroutine. Returns (found, result)."""
+# ============================================================================
+# DEVICE COMMAND
+# ============================================================================
+
+async def _call_device_method(
+    device_index,
+    method_name,
+    *args
+):
+    """
+    Find and execute a MirAIe device method.
+
+    IMPORTANT:
+    The miraie-ac device control methods are synchronous in the
+    Python package. We therefore run them in a worker thread so
+    they cannot block the MQTT asyncio event loop.
+
+    If a future version returns an awaitable, that is also supported.
+    """
+
     if not connected.is_set():
-        raise RuntimeError(connect_error or "Still connecting to MirAIe, try again shortly")
-    device = hub.home.devices[device_index]
-    method = getattr(device, method_name, None)
+        raise RuntimeError(
+            connect_error
+            or "MirAIe is not connected yet"
+        )
+
+    if hub is None:
+        raise RuntimeError(
+            "MirAIe hub is not initialized"
+        )
+
+    devices = hub.home.devices
+
+    if not devices:
+        raise RuntimeError(
+            "No MirAIe devices were found"
+        )
+
+    if device_index < 0 or device_index >= len(devices):
+        raise RuntimeError(
+            f"Device index {device_index} does not exist"
+        )
+
+    device = devices[device_index]
+
+    method = getattr(
+        device,
+        method_name,
+        None
+    )
+
     if method is None:
         return False, None
-    result = method(*args)
-    if asyncio.iscoroutine(result):
+
+    log.info(
+        "Executing device.%s(%s)",
+        method_name,
+        args
+    )
+
+    # ------------------------------------------------------------------------
+    # Run the synchronous device method OUTSIDE the MQTT event-loop thread.
+    # ------------------------------------------------------------------------
+
+    result = await asyncio.to_thread(
+        method,
+        *args
+    )
+
+    # Some future implementation may return a coroutine/future.
+    if inspect.isawaitable(result):
         result = await result
+
+    log.info(
+        "device.%s completed successfully",
+        method_name
+    )
+
     return True, result
 
 
-def call_device(method_name: str, *args, device_index=0, timeout=15):
+def call_device(
+    method_name,
+    *args,
+    device_index=0,
+    timeout=30
+):
+    """
+    Safely execute a MirAIe device command from a Flask request.
+
+    Flask is synchronous, while MirAIe uses asyncio.
+    The command is submitted to the dedicated asyncio loop.
+    """
+
+    if not connected.is_set():
+        raise RuntimeError(
+            connect_error
+            or "MirAIe is still connecting"
+        )
+
     future = asyncio.run_coroutine_threadsafe(
-        _call_device_method(device_index, method_name, *args), loop
+        _call_device_method(
+            device_index,
+            method_name,
+            *args
+        ),
+        loop
     )
-    return future.result(timeout=timeout)
+
+    try:
+
+        result = future.result(
+            timeout=timeout
+        )
+
+        return result
+
+    except TimeoutError:
+
+        log.error(
+            "Timeout while executing device.%s()",
+            method_name
+        )
+
+        future.cancel()
+
+        raise RuntimeError(
+            f"MirAIe command '{method_name}' timed out "
+            f"after {timeout} seconds"
+        )
+
+    except Exception:
+
+        log.exception(
+            "Error executing device.%s()",
+            method_name
+        )
+
+        raise
 
 
-def try_candidates(candidate_methods, *args, device_index=0):
-    """Tries each candidate method name in order, returns the first one that
-    exists on the device. This is here because the exact method names for
-    temperature/mode aren't documented publicly for this library."""
-    for name in candidate_methods:
-        found, result = call_device(name, *args, device_index=device_index)
-        if found:
-            return name, result
-    return None, None
-
-
-# --- Auth ---------------------------------------------------------------
+# ============================================================================
+# AUTHENTICATION
+# ============================================================================
 
 @app.before_request
 def check_auth():
+    """
+    Protect every endpoint except /health.
+    """
+
+    # Health check is public.
     if request.path == "/health":
-        return
-    if API_KEY and request.headers.get("X-Api-Key") != API_KEY:
-        return jsonify({"error": "unauthorized"}), 401
+        return None
+
+    # API key must be configured.
+    if not API_KEY:
+
+        return jsonify({
+            "error": "BRIDGE_API_KEY is not configured on the server"
+        }), 500
+
+    # Check API key.
+    supplied_key = request.headers.get(
+        "X-Api-Key"
+    )
+
+    if supplied_key != API_KEY:
+
+        return jsonify({
+            "error": "unauthorized"
+        }), 401
+
+    return None
 
 
-# --- Routes ---------------------------------------------------------------
+# ============================================================================
+# ROOT
+# ============================================================================
 
-@app.route("/health")
+@app.route(
+    "/",
+    methods=["GET"]
+)
+def root():
+
+    return jsonify({
+        "service": "MirAIe AC Bridge",
+        "status": "running",
+        "health": "/health"
+    })
+
+
+# ============================================================================
+# HEALTH
+# ============================================================================
+
+@app.route(
+    "/health",
+    methods=["GET"]
+)
 def health():
-    return jsonify({"status": "ok", "connected": connected.is_set(), "error": connect_error})
+
+    return jsonify({
+        "status": "ok",
+        "connected": connected.is_set(),
+        "error": connect_error
+    })
 
 
-@app.route("/ac/inspect")
-def inspect():
-    """One-time diagnostic: lists every public attribute/method on the device
-    object so we can confirm exact names for temperature/mode control."""
+# ============================================================================
+# INSPECT DEVICE
+# ============================================================================
+
+@app.route(
+    "/ac/inspect",
+    methods=["GET"]
+)
+def inspect_device():
+
     if not connected.is_set():
-        return jsonify({"error": connect_error or "not connected yet"}), 503
-    device = hub.home.devices[0]
-    members = sorted(m for m in dir(device) if not m.startswith("_"))
-    return jsonify({"device_repr": repr(device), "members": members})
+
+        return jsonify({
+            "error": (
+                connect_error
+                or "MirAIe is not connected yet"
+            )
+        }), 503
+
+    try:
+
+        device = hub.home.devices[0]
+
+        members = sorted(
+            member
+            for member in dir(device)
+            if not member.startswith("_")
+        )
+
+        return jsonify({
+            "device_repr": repr(device),
+            "members": members
+        })
+
+    except Exception as e:
+
+        log.exception(
+            "Device inspection failed"
+        )
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route("/ac/on", methods=["POST"])
+# ============================================================================
+# TURN ON
+# ============================================================================
+
+@app.route(
+    "/ac/on",
+    methods=["POST"]
+)
 def turn_on():
-    found, _ = call_device("turn_on")
-    if not found:
-        return jsonify({"error": "turn_on() not found on device"}), 500
-    return jsonify({"status": "on"})
+
+    try:
+
+        found, result = call_device(
+            "turn_on"
+        )
+
+        if not found:
+
+            return jsonify({
+                "error": (
+                    "turn_on() was not found "
+                    "on the MirAIe device"
+                )
+            }), 500
+
+        return jsonify({
+            "status": "on",
+            "method_used": "turn_on",
+            "result": str(result)
+        })
+
+    except Exception as e:
+
+        log.exception(
+            "AC ON command failed"
+        )
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route("/ac/off", methods=["POST"])
+# ============================================================================
+# TURN OFF
+# ============================================================================
+
+@app.route(
+    "/ac/off",
+    methods=["POST"]
+)
 def turn_off():
-    found, _ = call_device("turn_off")
-    if not found:
-        return jsonify({"error": "turn_off() not found on device"}), 500
-    return jsonify({"status": "off"})
+
+    try:
+
+        found, result = call_device(
+            "turn_off"
+        )
+
+        if not found:
+
+            return jsonify({
+                "error": (
+                    "turn_off() was not found "
+                    "on the MirAIe device"
+                )
+            }), 500
+
+        return jsonify({
+            "status": "off",
+            "method_used": "turn_off",
+            "result": str(result)
+        })
+
+    except Exception as e:
+
+        log.exception(
+            "AC OFF command failed"
+        )
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route("/ac/temperature/<int:value>", methods=["POST"])
+# ============================================================================
+# SET TEMPERATURE
+# ============================================================================
+
+@app.route(
+    "/ac/temperature/<int:value>",
+    methods=["POST"]
+)
 def set_temperature(value):
-    method_used, _ = try_candidates(
-        ["set_temperature", "set_temp", "set_target_temperature"], float(value)
-    )
-    if not method_used:
+
+    # Reasonable Panasonic AC temperature range.
+    if value < 16 or value > 30:
+
         return jsonify({
-            "error": "no temperature-setting method found on the device. "
-                     "Call /ac/inspect and update the candidate list in app.py."
+            "error": (
+                "Temperature must be between "
+                "16 and 30 degrees Celsius"
+            )
+        }), 400
+
+    try:
+
+        found, result = call_device(
+            "set_temperature",
+            float(value)
+        )
+
+        if not found:
+
+            return jsonify({
+                "error": (
+                    "set_temperature() was not found "
+                    "on the MirAIe device"
+                )
+            }), 500
+
+        return jsonify({
+            "status": "ok",
+            "method_used": "set_temperature",
+            "temperature": value,
+            "result": str(result)
+        })
+
+    except Exception as e:
+
+        log.exception(
+            "Temperature command failed"
+        )
+
+        return jsonify({
+            "error": str(e)
         }), 500
-    return jsonify({"status": "ok", "method_used": method_used, "temperature": value})
 
 
-@app.route("/ac/mode/<mode>", methods=["POST"])
+# ============================================================================
+# SET HVAC MODE
+# ============================================================================
+
+@app.route(
+    "/ac/mode/<mode>",
+    methods=["POST"]
+)
 def set_mode(mode):
-    method_used, _ = try_candidates(
-        ["set_mode", "set_hvac_mode", "set_operation_mode"], mode
-    )
-    if not method_used:
-        return jsonify({
-            "error": "no mode-setting method found on the device. "
-                     "Call /ac/inspect and update the candidate list in app.py."
-        }), 500
-    return jsonify({"status": "ok", "method_used": method_used, "mode": mode})
 
+    mode = mode.lower().strip()
+
+    allowed_modes = {
+        "cool",
+        "dry",
+        "heat",
+        "auto",
+        "fan"
+    }
+
+    if mode not in allowed_modes:
+
+        return jsonify({
+            "error": (
+                "Invalid mode. Allowed modes are: "
+                "cool, dry, heat, auto, fan"
+            )
+        }), 400
+
+    try:
+
+        found, result = call_device(
+            "set_hvac_mode",
+            mode
+        )
+
+        if not found:
+
+            return jsonify({
+                "error": (
+                    "set_hvac_mode() was not found "
+                    "on the MirAIe device"
+                )
+            }), 500
+
+        return jsonify({
+            "status": "ok",
+            "method_used": "set_hvac_mode",
+            "mode": mode,
+            "result": str(result)
+        })
+
+    except Exception as e:
+
+        log.exception(
+            "HVAC mode command failed"
+        )
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+
+# ============================================================================
+# APPLICATION START
+# ============================================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        threaded=True
+    )
