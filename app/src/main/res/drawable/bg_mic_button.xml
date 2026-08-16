@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="oval">
+            <gradient
+                android:type="linear"
+                android:angle="45"
+                android:startColor="@color/mic_start"
+                android:centerColor="@color/mic_middle"
+                android:endColor="@color/mic_end" />
+            <stroke android:width="2dp" android:color="#8FE9FF"/>
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:type="linear"
+                android:angle="45"
+                android:startColor="#1C4262"
+                android:centerColor="#204C74"
+                android:endColor="#1A3A58" />
+            <stroke android:width="2dp" android:color="#4C83AD"/>
+        </shape>
+    </item>
+</selector>

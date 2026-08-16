@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- ============================================================ -->
+    <!-- Background -->
+    <!-- ============================================================ -->
+    <color name="bg_black">#05070D</color>
+    <color name="bg_black_soft">#090D18</color>
+
+    <!-- ============================================================ -->
+    <!-- Glass / surfaces -->
+    <!-- ============================================================ -->
+    <color name="glass_card">#12FFFFFF</color>
+    <color name="glass_card_strong">#18FFFFFF</color>
+    <color name="glass_pill">#16FFFFFF</color>
+
+    <color name="surface_card">#0F1826</color>
+    <color name="surface_card_alt">#0B131F</color>
+    <color name="surface_control">#141F2C</color>
+    <color name="surface_control_pressed">#1D2E40</color>
+    <color name="surface_pill">#0EFFFFFF</color>
+
+    <!-- ============================================================ -->
+    <!-- Borders -->
+    <!-- ============================================================ -->
+    <color name="glass_border">#30FFFFFF</color>
+    <color name="glass_border_soft">#25FFFFFF</color>
+    <color name="border_soft">#20324A</color>
+    <color name="border_strong">#33465F</color>
+
+    <!-- ============================================================ -->
+    <!-- Accents -->
+    <!-- ============================================================ -->
+    <color name="accent_cyan">#00E5FF</color>
+    <color name="accent_blue">#4D7CFF</color>
+    <color name="accent_cyan_soft">#6600E5FF</color>
+
+    <color name="accent_ac">#22D3EE</color>
+    <color name="accent_ac_dark">#0891B2</color>
+    <color name="accent_tv">#A78BFA</color>
+    <color name="accent_tv_dark">#7C3AED</color>
+
+    <!-- ============================================================ -->
+    <!-- Mic -->
+    <!-- ============================================================ -->
+    <color name="mic_start">#00E5FF</color>
+    <color name="mic_middle">#4D9FFF</color>
+    <color name="mic_end">#4D7CFF</color>
+
+    <!-- ============================================================ -->
+    <!-- Text -->
+    <!-- ============================================================ -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B7C0D0</color>
+    <color name="text_muted">#687386</color>
+    <color name="text_faint">#4E5A6E</color>
+
+    <!-- ============================================================ -->
+    <!-- Status -->
+    <!-- ============================================================ -->
+    <color name="success">#22C55E</color>
+    <color name="success_soft">#0F2A1C</color>
+    <color name="success_border">#2FBE71</color>
+
+    <color name="danger">#F87171</color>
+    <color name="danger_soft">#2A1418</color>
+    <color name="danger_border">#EF4444</color>
+
+    <!-- ============================================================ -->
+    <!-- Glow -->
+    <!-- ============================================================ -->
+    <color name="glow_cyan">#5500E5FF</color>
+
+    <!-- ============================================================ -->
+    <!-- Compatibility (kept for older resources still referencing these) -->
+    <!-- ============================================================ -->
+    <color name="bg_dark_start">#05070D</color>
+    <color name="bg_dark_end">#090D18</color>
+    <color name="accent_purple">#4D7CFF</color>
+    <color name="accent_purple_light">#00E5FF</color>
+    <color name="accent_pink">#4D7CFF</color>
+    <color name="card_bg">#12FFFFFF</color>
+    <color name="pill_bg">#16FFFFFF</color>
+    <color name="ring_color">#5500E5FF</color>
+
+</resources>

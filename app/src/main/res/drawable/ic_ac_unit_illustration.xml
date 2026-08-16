@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="220dp"
+    android:height="72dp"
+    android:viewportWidth="220"
+    android:viewportHeight="72">
+
+    <!-- Unit body -->
+    <path
+        android:fillColor="#1B2637"
+        android:pathData="M4,6 C4,3 6.5,1 10,1 L210,1 C213.5,1 216,3 216,6 L216,44 C216,50 210,55 200,55 L20,55 C10,55 4,50 4,44 Z" />
+
+    <!-- subtle top highlight -->
+    <path
+        android:fillColor="#26334A"
+        android:pathData="M8,4 L212,4 L212,10 L8,10 Z" />
+
+    <!-- vent slits -->
+    <path
+        android:fillColor="#0F1826"
+        android:strokeColor="#0F1826"
+        android:pathData="M20,46 L196,46 L196,48.4 L20,48.4 Z" />
+    <path
+        android:fillColor="#0F1826"
+        android:pathData="M24,50 L192,50 L192,51.8 L24,51.8 Z" />
+
+    <!-- accent stripe (Panasonic yellow) -->
+    <path
+        android:fillColor="#F4B400"
+        android:pathData="M4,40 C40,38 120,44 216,38 L216,41.4 C120,47.4 40,41.4 4,43.4 Z" />
+
+    <!-- brand dot -->
+    <path
+        android:fillColor="#4A5A72"
+        android:pathData="M12,16 C12,14.9 12.9,14 14,14 L26,14 C27.1,14 28,14.9 28,16 C28,17.1 27.1,18 26,18 L14,18 C12.9,18 12,17.1 12,16 Z" />
+
+</vector>

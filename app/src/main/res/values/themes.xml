@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style
+        name="Theme.VoiceAssistant"
+        parent="Theme.MaterialComponents.DayNight.NoActionBar">
+
+        <item name="colorPrimary">@color/accent_blue</item>
+        <item name="colorPrimaryDark">@color/bg_black</item>
+        <item name="colorAccent">@color/accent_cyan</item>
+        <item name="colorSecondary">@color/accent_cyan</item>
+
+        <item name="android:windowBackground">@color/bg_black</item>
+
+        <item name="android:statusBarColor">@color/bg_black</item>
+        <item name="android:navigationBarColor">@color/bg_black</item>
+
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+        <item name="android:fontFamily">sans-serif</item>
+
+        <item name="android:windowActionModeOverlay">true</item>
+
+        <!--
+            IMPORTANT FIX:
+            Under Theme.MaterialComponents every plain <Button> is auto-inflated
+            as a MaterialButton. MaterialButton always paints a solid
+            "backgroundTint" (defaulting to colorPrimary) ON TOP of whatever
+            android:background shape you set, which is why every button in
+            this app was rendering as a flat white block regardless of the
+            custom drawables assigned to them. Routing all buttons through
+            AppButton.Flat (which nulls that tint and the default insets/
+            elevation/padding) lets our own drawable shapes show through
+            correctly everywhere in the app.
+        -->
+        <item name="materialButtonStyle">@style/AppButton.Flat</item>
+        <item name="buttonStyle">@style/AppButton.Flat</item>
+
+    </style>
+
+</resources>

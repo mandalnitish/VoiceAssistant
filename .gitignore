@@ -1,0 +1,27 @@
+﻿# Android / Gradle
+.gradle/
+build/
+*/build/
+.idea/
+*.iml
+local.properties
+
+# Kotlin
+.kotlin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db

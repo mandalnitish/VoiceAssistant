@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.example.voiceassistant'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.voiceassistant"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        buildConfigField "String", "AC_API_BASE_URL", "\"https://ac.nitishmandal.site/\""
+        buildConfigField "String", "BRIDGE_API_KEY", "\"7f3c9a8e2d4b41c5a6f8910e3b7d2c1419072005\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+
+    // HTTP client
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    implementation 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
+}
